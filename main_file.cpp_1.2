@@ -1,0 +1,116 @@
+#include <iostream>
+#include <thread>
+#include <chrono>
+#include <fstream>
+#include <vector>
+#include <cstdlib>
+#include <mutex>
+
+#ifdef _WIN32
+#include <windows.h>
+#elif __linux__
+#include <fstream>
+#elif __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
+#include <matplotlibcpp.h>
+namespace plt = matplotlibcpp;
+
+std::mutex log_mutex;
+
+void sendNotification(const std::string& message) {
+#ifdef _WIN32
+    MessageBox(NULL, message.c_str(), "CPU Heat Monitor Alert", MB_OK | MB_ICONWARNING);
+#elif __linux__
+    std::string command = "notify-send \"CPU Heat Monitor\" \"" + message + "\"";
+    system(command.c_str());
+#elif __APPLE__
+    std::string command = "osascript -e 'display notification \"" + message + "\" with title \"CPU Heat Monitor\"'";
+    system(command.c_str());
+#endif
+}
+
+void plotTemperature(const std::vector<double>& temps, const std::vector<int>& times) {
+    plt::clf();
+    plt::plot(times, temps, "r-");
+    plt::xlabel("Time (s)");
+    plt::ylabel("CPU Temperature (°C)");
+    plt::title("Real-Time CPU Temperature");
+    plt::grid(true);
+    plt::pause(0.1);
+}
+
+void fetchAndMonitorTemperature(double threshold, int interval) {
+    std::vector<double> temperatures;
+    std::vector<int> timestamps;
+    int time = 0;
+
+    while (true) {
+        double temperature = 0.0;
+
+#ifdef _WIN32
+        temperature = 45.0;
+#elif __linux__
+        std::ifstream tempFile("/sys/class/thermal/thermal_zone0/temp");
+        if (tempFile.is_open()) {
+            int tempMilli;
+            tempFile >> tempMilli;
+            temperature = tempMilli / 1000.0;
+            tempFile.close();
+        } else {
+            std::cerr << "Unable to access temperature sensor.\n";
+        }
+#elif __APPLE__
+        temperature = 50.0;
+#endif
+
+        if (temperature > 0.0) {
+            {
+                std::lock_guard<std::mutex> lock(log_mutex);
+                std::cout << "Current CPU Temperature: " << temperature << "°C\n";
+            }
+
+            if (temperature > threshold) {
+                std::string alert = "ALERT: CPU temperature exceeded " + std::to_string(threshold) + "°C!";
+                {
+                    std::lock_guard<std::mutex> lock(log_mutex);
+                    std::cerr << alert << "\n";
+                }
+                sendNotification(alert);
+            }
+
+            temperatures.push_back(temperature);
+            timestamps.push_back(time);
+            if (temperatures.size() > 100) {
+                temperatures.erase(temperatures.begin());
+                timestamps.erase(timestamps.begin());
+            }
+
+            plotTemperature(temperatures, timestamps);
+        }
+
+        time += interval;
+        std::this_thread::sleep_for(std::chrono::seconds(interval));
+    }
+}
+
+int main() {
+    std::cout << "=== CPU Heat Monitor ===\n";
+
+    double threshold;
+    int interval;
+
+    std::cout << "Enter temperature threshold (°C): ";
+    std::cin >> threshold;
+
+    std::cout << "Enter monitoring interval (seconds): ";
+    std::cin >> interval;
+
+    std::cout << "Monitoring CPU temperature...\n";
+
+    std::thread monitorThread(fetchAndMonitorTemperature, threshold, interval);
+    monitorThread.join();
+
+    return 0;
+}
